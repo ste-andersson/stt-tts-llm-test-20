@@ -5,7 +5,7 @@ class LLMConfig(BaseModel):
     """Konfiguration för LLM-modulen."""
     
     # OpenAI-inställningar
-    model: str = "gpt-5"
+    model: str = "gpt-4"
     temperature: float = 0.7
     max_tokens: int = 500
     

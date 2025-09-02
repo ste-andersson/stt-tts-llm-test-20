@@ -56,18 +56,6 @@ async def ws_transcribe(ws: WebSocket):
     # Flagga för att veta om vi har skickat ljud
     has_audio = False
     last_audio_time = 0  # Timestamp för senaste ljud
-    
-    # Latens-mätningar
-    session_start_time = time.time()
-    first_audio_time = None
-    last_commit_time = 0
-    
-    # Pipeline timing
-    silence_detection_start = None
-    stt_start_time = None
-    llm_start_time = None
-    tts_start_time = None
-    audio_playback_start = None
 
     # Task: läs events från Realtime och skicka deltas till frontend
     async def on_rt_event(evt: dict):
@@ -92,7 +80,7 @@ async def ws_transcribe(ws: WebSocket):
             
         # Hantera transcript events
         if result["type"] == "transcript" and ws.client_state == WebSocketState.CONNECTED:
-            last_text = await send_transcription_to_frontend(ws, result, send_json, buffers, session_id, session_start_time) or last_text
+            last_text = await send_transcription_to_frontend(ws, result, send_json, buffers, session_id) or last_text
 
     rt_recv_task = asyncio.create_task(rt.recv_loop(on_rt_event))
 
@@ -106,24 +94,9 @@ async def ws_transcribe(ws: WebSocket):
                 if has_audio:
                     # Kontrollera om det har gått för lång tid sedan senaste ljudet
                     import time
-                    if time.time() - last_audio_time > 0.7:  # 0.7 sekunder timeout
+                    if time.time() - last_audio_time > 2.0:  # 2 sekunder timeout
                         has_audio = False
-                        current_time = time.time()
-                        timeout_duration = current_time - last_audio_time
-                        
-                        # Mät tystnadsupptäckt
-                        silence_detection_start = current_time
-                        silence_detection_duration = timeout_duration
-                        
-                        log.info(f"[LATENS] Tystnadsupptäckt: {silence_detection_duration:.3f}s sedan senaste ljuddata")
                         log.debug("Timeout - återställer has_audio flaggan")
-                        
-                        # Skicka timeout-meddelande till frontend
-                        if send_json and ws.client_state == WebSocketState.CONNECTED:
-                            await ws.send_json({
-                                "type": "stt.timeout",
-                                "message": "No audio received for 0.7 seconds - waiting for final transcription"
-                            })
                         continue
                     
                     try:

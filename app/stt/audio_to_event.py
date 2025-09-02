@@ -69,9 +69,9 @@ class AudioToEventClient:
                 },
                 "turn_detection": {
                     "type": "server_vad",
-                    "threshold": 0.3,  # Lägre = mer känslig för tystnad
-                    "prefix_padding_ms": 150,  # Kortare padding
-                    "silence_duration_ms": 250,  # Kortare tystnad krävs
+                    "threshold": 0.5,
+                    "prefix_padding_ms": 300,
+                    "silence_duration_ms": 500,
                     "create_response": False,  # vi vill bara STT
                     "interrupt_response": True
                 },
