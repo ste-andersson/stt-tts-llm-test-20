@@ -15,19 +15,26 @@ ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")  # Hämtas från .env
 
 def calculate_dynamic_timeout(text_length: int) -> int:
     """
-    Beräknar dynamisk timeout baserat på textlängd.
+    Beräknar dynamisk timeout baserat på textlängd och uppskattad talspråkstid.
     
-    Formel: 
-    - Bas-timeout: 3 sekunder
-    - Extra tid: 0.1 sekund per 10 tecken
-    - Min: 3s, Max: 30s
+    Formel baserad på talspråkshastighet:
+    - Genomsnittlig talspråkshastighet: ~150 ord per minut
+    - Genomsnittligt antal tecken per ord: ~5 tecken
+    - Detta ger ~12.5 tecken per sekund
+    - Vi lägger till 50% marginal för ElevenLabs processing
+    - Min: 5s, Max: 60s
     """
-    base_timeout = 3
-    extra_time = (text_length / 10) * 0.1  # 0.1s per 10 tecken
-    total_timeout = base_timeout + extra_time
+    # Uppskatta talspråkstid baserat på ~12.5 tecken per sekund
+    estimated_speech_time = text_length / 12.5
     
-    # Begränsa mellan 3 och 30 sekunder
-    return max(3, min(30, int(total_timeout)))
+    # Lägg till 50% marginal för ElevenLabs processing och nätverksfördröjning
+    total_timeout = estimated_speech_time * 1.5
+    
+    # Lägg till minimum bas-timeout för mycket korta meddelanden
+    total_timeout = max(5, total_timeout)
+    
+    # Begränsa till max 60 sekunder
+    return max(5, min(60, int(total_timeout)))
 
 async def process_text_to_audio(ws, text, started_at):
     """Hanterar ElevenLabs API-kommunikation och returnerar rå data."""
@@ -43,7 +50,11 @@ async def process_text_to_audio(ws, text, started_at):
     # Beräkna dynamisk timeout baserat på textlängd
     text_length = len(text)
     inactivity_timeout_sec = calculate_dynamic_timeout(text_length)
-    logger.info("Text length: %d chars, calculated timeout: %ds", text_length, inactivity_timeout_sec)
+    
+    # Beräkna uppskattad talspråkstid för loggning
+    estimated_speech_time = text_length / 12.5
+    logger.info("Text: %d chars, estimated speech time: %.1fs, timeout: %ds", 
+                text_length, estimated_speech_time, inactivity_timeout_sec)
 
     audio_bytes_total = 0
 
