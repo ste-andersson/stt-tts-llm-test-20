@@ -5,12 +5,16 @@ import time
 import orjson
 from fastapi import WebSocket, WebSocketDisconnect
 from websockets.exceptions import ConnectionClosedOK, ConnectionClosedError
+from typing import Dict, Optional
 
 from ..tts.receive_text_from_frontend import receive_and_validate_text
 from ..tts.text_to_audio import process_text_to_audio
 from ..tts.send_audio_to_frontend import send_audio_to_frontend
 
 logger = logging.getLogger("stefan-api-test-16")
+
+# Global state för att hålla koll på pågående TTS-förfrågningar per WebSocket
+active_tts_requests: Dict[WebSocket, asyncio.Task] = {}
 
 async def _send_json(ws, obj: dict):
     """Skicka JSON (utf-8) till frontend."""
@@ -59,8 +63,30 @@ async def ws_tts(ws: WebSocket):
                                 await _send_json(ws, {"type": "error", "message": "No text provided"})
                                 continue
                             
-                            # Processa TTS-förfrågan
-                            await _process_tts_request(ws, text, session_started_at)
+                            # Avbryt pågående TTS-förfrågan om det finns en
+                            if ws in active_tts_requests:
+                                old_task = active_tts_requests[ws]
+                                if not old_task.done():
+                                    logger.info("Cancelling previous TTS request to prioritize new one")
+                                    old_task.cancel()
+                                    try:
+                                        await old_task
+                                    except asyncio.CancelledError:
+                                        pass
+                                del active_tts_requests[ws]
+                            
+                            # Starta ny TTS-förfrågan som en task
+                            task = asyncio.create_task(_process_tts_request(ws, text, session_started_at))
+                            active_tts_requests[ws] = task
+                            
+                            try:
+                                await task
+                            except asyncio.CancelledError:
+                                logger.info("TTS request was cancelled")
+                            finally:
+                                # Ta bort från active requests när klar
+                                if ws in active_tts_requests:
+                                    del active_tts_requests[ws]
                         
                         # Hantera disconnect-förfrågan
                         elif data.get("type") == "disconnect":
@@ -93,6 +119,17 @@ async def ws_tts(ws: WebSocket):
         except Exception:
             pass
     finally:
+        # Rensa upp active TTS requests för denna WebSocket
+        if ws in active_tts_requests:
+            old_task = active_tts_requests[ws]
+            if not old_task.done():
+                old_task.cancel()
+                try:
+                    await old_task
+                except asyncio.CancelledError:
+                    pass
+            del active_tts_requests[ws]
+        
         try:
             await ws.close()
         except Exception:
@@ -105,6 +142,11 @@ async def _process_tts_request(ws: WebSocket, text: str, session_started_at: flo
     request_started_at = time.time()
     
     try:
+        # Kontrollera om denna request redan är cancelled
+        if asyncio.current_task().cancelled():
+            logger.info("TTS request was cancelled before processing started")
+            return
+            
         await _send_json(ws, {
             "type": "status", 
             "stage": "processing",
@@ -122,6 +164,11 @@ async def _process_tts_request(ws: WebSocket, text: str, session_started_at: flo
         last_chunk_ts = None
         
         async for server_msg, current_audio_bytes in process_text_to_audio(ws, text, request_started_at):
+            # Kontrollera om denna request är cancelled under streaming
+            if asyncio.current_task().cancelled():
+                logger.info("TTS request was cancelled during streaming")
+                return
+                
             # Hantera audio-streaming till frontend
             audio_bytes_total, last_chunk_ts, should_break = await send_audio_to_frontend(
                 ws, server_msg, current_audio_bytes, last_chunk_ts
@@ -130,6 +177,11 @@ async def _process_tts_request(ws: WebSocket, text: str, session_started_at: flo
             if should_break:
                 break
         
+        # Kontrollera om denna request är cancelled innan vi skickar "done"
+        if asyncio.current_task().cancelled():
+            logger.info("TTS request was cancelled before completion")
+            return
+            
         await _send_json(ws, {
             "type": "status",
             "stage": "done",
@@ -140,6 +192,19 @@ async def _process_tts_request(ws: WebSocket, text: str, session_started_at: flo
         
         logger.info("TTS request completed: %d bytes, %.3fs", audio_bytes_total, time.time() - request_started_at)
 
+    except asyncio.CancelledError:
+        logger.info("TTS request was cancelled: %s", text[:50] + "..." if len(text) > 50 else text)
+        # Skicka cancellation-meddelande till frontend
+        try:
+            await _send_json(ws, {
+                "type": "status",
+                "stage": "cancelled",
+                "request_id": int(request_started_at * 1000)
+            })
+        except Exception:
+            pass  # Ignorera fel om WebSocket redan är stängd
+        raise  # Re-raise CancelledError så att den hanteras korrekt
+        
     except Exception as e:
         logger.error("Error processing TTS request: %s", e)
         await _send_json(ws, {

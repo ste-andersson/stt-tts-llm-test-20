@@ -87,11 +87,19 @@ async def process_text_to_audio(ws, text, started_at):
 
         # 6) Läs streamen och returnera rå data
         while True:
+            # Kontrollera om denna request är cancelled
+            if asyncio.current_task().cancelled():
+                logger.info("TTS request was cancelled during ElevenLabs streaming")
+                break
+                
             try:
                 server_msg = await asyncio.wait_for(eleven.recv(), timeout=inactivity_timeout_sec)
             except asyncio.TimeoutError:
                 # Vi har inte fått något på N sekunder → ge upp snyggt
                 logger.warning("No data from ElevenLabs for %ss, aborting stream", inactivity_timeout_sec)
+                break
+            except asyncio.CancelledError:
+                logger.info("TTS request was cancelled during ElevenLabs receive")
                 break
 
             # Returnera rå data från ElevenLabs
