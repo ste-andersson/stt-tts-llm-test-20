@@ -84,6 +84,12 @@ async def ws_tts(ws: WebSocket):
                             logger.info("Client requested disconnect")
                             break
                         
+                        # Hantera playback_complete-meddelande från frontend
+                        elif data.get("type") == "playback_complete":
+                            request_id = data.get("requestId")
+                            logger.info("Received playback_complete for requestId: %s", request_id)
+                            await _send_json(ws, {"type": "status", "stage": "done"})
+                        
                         else:
                             await _send_json(ws, {"type": "error", "message": f"Unknown message type: {data.get('type')}"})
                 
