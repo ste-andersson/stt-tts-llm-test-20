@@ -63,18 +63,32 @@ async def ws_tts(ws: WebSocket):
                                 await _send_json(ws, {"type": "error", "message": "No text provided"})
                                 continue
                             
+                            logger.info("🎤 New TTS request received: %s", text[:50] + "..." if len(text) > 50 else text)
+                            logger.info("🔍 WebSocket state: %s, active_tts_requests keys: %s", 
+                                       ws.client_state, list(active_tts_requests.keys()))
+                            
                             # Avbryt pågående TTS-förfrågan om det finns en
                             if ws in active_tts_requests:
                                 old_task = active_tts_requests[ws]
+                                task_done = old_task.done() if old_task else "no_task"
+                                logger.info("🔍 Found existing active task, task done: %s", task_done)
+                                
                                 if not old_task.done():
-                                    logger.info("Cancelling previous TTS request to prioritize new one")
+                                    logger.info("🛑 Cancelling previous TTS request to prioritize new one")
                                     old_task.cancel()
                                     # Vänta inte på att gamla task avslutas - starta ny direkt
+                                else:
+                                    logger.info("✅ Previous task was already done, cleaning up")
+                                
                                 del active_tts_requests[ws]
+                                logger.info("🔍 Cleared old task, remaining active_tts_requests keys: %s", list(active_tts_requests.keys()))
+                            else:
+                                logger.info("✅ No existing active task found - channel is free")
                             
                             # Starta ny TTS-förfrågan som en task (utan att vänta)
                             task = asyncio.create_task(_process_tts_request(ws, text, session_started_at))
                             active_tts_requests[ws] = task
+                            logger.info("🚀 Started new TTS task, active_tts_requests keys: %s", list(active_tts_requests.keys()))
                             
                             # Låt task köra i bakgrunden utan att blockera
                             # Detta gör att nya förfrågningar kan komma in snabbt
@@ -87,14 +101,25 @@ async def ws_tts(ws: WebSocket):
                         # Hantera playback_complete-meddelande från frontend
                         elif data.get("type") == "playback_complete":
                             request_id = data.get("requestId")
-                            logger.info("Received playback_complete for requestId: %s", request_id)
+                            logger.info("🎵 Received playback_complete for requestId: %s", request_id)
+                            logger.info("🔍 WebSocket state: %s, active_tts_requests keys: %s", 
+                                       ws.client_state, list(active_tts_requests.keys()))
                             
                             # RENSA active_tts_requests när playback är klar
                             if ws in active_tts_requests:
+                                old_task = active_tts_requests[ws]
+                                task_done = old_task.done() if old_task else "no_task"
+                                logger.info("🔍 Found active task for this WebSocket, task done: %s", task_done)
+                                
                                 del active_tts_requests[ws]
-                                logger.info("Cleared active TTS request after playback_complete - channel is now free")
+                                logger.info("✅ Cleared active TTS request after playback_complete - channel is now free")
+                                logger.info("🔍 Remaining active_tts_requests keys: %s", list(active_tts_requests.keys()))
+                            else:
+                                logger.warning("⚠️ No active TTS request found for this WebSocket in playback_complete")
+                                logger.info("🔍 Current active_tts_requests keys: %s", list(active_tts_requests.keys()))
                             
                             await _send_json(ws, {"type": "status", "stage": "done"})
+                            logger.info("📤 Sent 'done' status to frontend after playback_complete")
                         
                         else:
                             await _send_json(ws, {"type": "error", "message": f"Unknown message type: {data.get('type')}"})
@@ -205,7 +230,11 @@ async def _process_tts_request(ws: WebSocket, text: str, session_started_at: flo
         # RENSA active_tts_requests när TTS-förfrågan är klar
         if ws in active_tts_requests:
             del active_tts_requests[ws]
-            logger.info("Cleared active TTS request - channel is now free")
+            logger.info("✅ Cleared active TTS request after normal completion - channel is now free")
+            logger.info("🔍 Remaining active_tts_requests keys: %s", list(active_tts_requests.keys()))
+        else:
+            logger.warning("⚠️ No active TTS request found for this WebSocket in normal completion")
+            logger.info("🔍 Current active_tts_requests keys: %s", list(active_tts_requests.keys()))
 
     except asyncio.CancelledError:
         logger.info("TTS request was cancelled: %s", text[:50] + "..." if len(text) > 50 else text)
@@ -231,4 +260,7 @@ async def _process_tts_request(ws: WebSocket, text: str, session_started_at: flo
         # Säkerställ att active_tts_requests rensas även vid fel
         if ws in active_tts_requests:
             del active_tts_requests[ws]
-            logger.info("Cleared active TTS request in finally block - channel is now free")
+            logger.info("✅ Cleared active TTS request in finally block - channel is now free")
+            logger.info("🔍 Remaining active_tts_requests keys: %s", list(active_tts_requests.keys()))
+        else:
+            logger.info("🔍 No active TTS request found in finally block - channel was already free")

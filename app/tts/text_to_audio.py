@@ -13,22 +13,45 @@ DEFAULT_MODEL_ID = "eleven_flash_v2_5"
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")  # Hämtas från .env
 
 
-def calculate_simple_timeout(text_length: int) -> int:
+def calculate_aggressive_timeout(text_length: int, audio_bytes_received: int = 0) -> int:
     """
-    Enkel timeout som bara används som fallback om ElevenLabs inte skickar "isFinal".
+    Aggressiv timeout-strategi med flera steg för att eliminera blockering.
     
     Strategi:
-    1. Lita på ElevenLabs "isFinal" signaler för naturlig avslutning
-    2. Använd bara timeout som fallback för att undvika att hänga
-    3. Mycket generös timeout eftersom vi litar på ElevenLabs
+    1. Börja med korta timeouts (2-3 sekunder)
+    2. Öka gradvis om audio fortfarande kommer in
+    3. Men ha strikta max-gränser för att undvika oändlig väntan
+    4. Använd audio-aktivitet för att justera timeout dynamiskt
     """
-    # Generös timeout som bara används som fallback
-    if text_length <= 100:
-        return 8  # 8 sekunder för korta meddelanden
-    elif text_length <= 300:
-        return 15  # 15 sekunder för medellånga meddelanden
+    # Bas-timeout baserat på text-längd (mycket kortare än tidigare)
+    if text_length <= 50:
+        base_timeout = 4  # 2 sekunder för mycket korta meddelanden
+    elif text_length <= 100:
+        base_timeout = 8  # 3 sekunder för korta meddelanden
+    elif text_length <= 200:
+        base_timeout = 14  # 4 sekunder för medellånga meddelanden
+    elif text_length <= 400:
+        base_timeout = 22  # 5 sekunder för långa meddelanden
     else:
-        return 25  # 25 sekunder för långa meddelanden
+        base_timeout = 26  # 6 sekunder för mycket långa meddelanden
+    
+    # Justera baserat på audio-aktivitet
+    if audio_bytes_received > 0:
+        # Om vi redan har fått audio, använd kortare timeout
+        adjusted_timeout = max(1, base_timeout - 1)
+    else:
+        # Om vi inte har fått någon audio än, använd bas-timeout
+        adjusted_timeout = base_timeout
+    
+    # Max-gräns för att undvika oändlig väntan
+    max_timeout = 8
+    
+    final_timeout = min(adjusted_timeout, max_timeout)
+    
+    logger.debug("Timeout calculation: text_len=%d, audio_bytes=%d, base=%d, adjusted=%d, final=%d", 
+                text_length, audio_bytes_received, base_timeout, adjusted_timeout, final_timeout)
+    
+    return final_timeout
 
 async def process_text_to_audio(ws, text, started_at):
     """Hanterar ElevenLabs API-kommunikation och returnerar rå data."""
@@ -41,14 +64,16 @@ async def process_text_to_audio(ws, text, started_at):
     # Logga API-detaljer i terminalen
     logger.info("Connecting to ElevenLabs with voice_id=%s, model_id=%s", DEFAULT_VOICE_ID, DEFAULT_MODEL_ID)
     
-    # Beräkna enkel timeout som fallback
+    # Beräkna aggressiv timeout-strategi
     text_length = len(text)
     audio_bytes_total = 0
+    last_audio_time = time.time()
+    consecutive_empty_receives = 0
     
-    # Enkel timeout som bara används som fallback
-    fallback_timeout_sec = calculate_simple_timeout(text_length)
-    logger.info("Text: %d chars, fallback timeout: %ds (litar på ElevenLabs 'isFinal')", 
-                text_length, fallback_timeout_sec)
+    # Initial timeout (mycket kortare)
+    current_timeout_sec = calculate_aggressive_timeout(text_length, 0)
+    logger.info("🚀 AGGRESSIVE TIMEOUT: Text: %d chars, initial timeout: %ds (max 8s)", 
+                text_length, current_timeout_sec)
 
     async with ws_connect(eleven_ws_url, extra_headers=headers, open_timeout=5) as eleven:
         # 3) Initiera session
@@ -79,21 +104,43 @@ async def process_text_to_audio(ws, text, started_at):
         await eleven.send(orjson.dumps({"text": "", "flush": True}).decode())
         logger.debug("Sent flush message to ElevenLabs")
 
-        # 6) Läs streamen och returnera rå data
+        # 6) Läs streamen med aggressiv timeout-strategi
         while True:
             # Kontrollera om denna request är cancelled
             if asyncio.current_task().cancelled():
                 logger.info("TTS request was cancelled during ElevenLabs streaming")
                 break
+            
+            # Uppdatera timeout baserat på audio-aktivitet
+            current_timeout_sec = calculate_aggressive_timeout(text_length, audio_bytes_total)
+            
+            # Kontrollera om det har gått för lång tid sedan senaste audio
+            time_since_last_audio = time.time() - last_audio_time
+            if time_since_last_audio > 3.0 and audio_bytes_total > 0:
+                logger.warning("🛑 No audio for %.1fs, aborting stream (audio_bytes=%d)", 
+                             time_since_last_audio, audio_bytes_total)
+                break
                 
             try:
-                # Använd enkel timeout som fallback - lita på ElevenLabs "isFinal"
-                server_msg = await asyncio.wait_for(eleven.recv(), timeout=fallback_timeout_sec)
+                # Använd dynamisk timeout - mycket kortare än tidigare
+                server_msg = await asyncio.wait_for(eleven.recv(), timeout=current_timeout_sec)
+                consecutive_empty_receives = 0  # Reset counter
             except asyncio.TimeoutError:
-                # Fallback timeout - ElevenLabs skickade inte "isFinal" inom rimlig tid
-                logger.warning("ElevenLabs fallback timeout after %ds (audio_bytes=%d), aborting stream", 
-                             fallback_timeout_sec, audio_bytes_total)
-                break
+                consecutive_empty_receives += 1
+                logger.warning("⏰ ElevenLabs timeout after %ds (audio_bytes=%d, empty_receives=%d)", 
+                             current_timeout_sec, audio_bytes_total, consecutive_empty_receives)
+                
+                # Om vi har fått audio men inget nytt på 2+ timeouts, avsluta
+                if consecutive_empty_receives >= 2 and audio_bytes_total > 0:
+                    logger.warning("🛑 Multiple timeouts with audio received, aborting stream")
+                    break
+                # Om vi inte har fått någon audio på 3+ timeouts, avsluta
+                elif consecutive_empty_receives >= 3:
+                    logger.warning("🛑 Multiple timeouts with no audio, aborting stream")
+                    break
+                else:
+                    continue  # Försök igen med samma timeout
+                    
             except asyncio.CancelledError:
                 logger.info("TTS request was cancelled during ElevenLabs receive")
                 break
@@ -101,9 +148,11 @@ async def process_text_to_audio(ws, text, started_at):
             # Returnera rå data från ElevenLabs
             yield server_msg, audio_bytes_total
 
-            # Uppdatera audio_bytes_total för binary frames
+            # Uppdatera audio_bytes_total och timing för binary frames
             if isinstance(server_msg, (bytes, bytearray)):
                 audio_bytes_total += len(server_msg)
+                last_audio_time = time.time()
+                logger.debug("🎵 Received audio chunk: %d bytes (total=%d)", len(server_msg), audio_bytes_total)
 
             # Lita på att send_audio_to_frontend hanterar isFinal-signaler
             # Vi behöver inte hantera det här eftersom tts_ws.py gör det
