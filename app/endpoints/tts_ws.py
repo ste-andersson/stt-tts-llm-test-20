@@ -69,24 +69,15 @@ async def ws_tts(ws: WebSocket):
                                 if not old_task.done():
                                     logger.info("Cancelling previous TTS request to prioritize new one")
                                     old_task.cancel()
-                                    try:
-                                        await old_task
-                                    except asyncio.CancelledError:
-                                        pass
+                                    # Vänta inte på att gamla task avslutas - starta ny direkt
                                 del active_tts_requests[ws]
                             
-                            # Starta ny TTS-förfrågan som en task
+                            # Starta ny TTS-förfrågan som en task (utan att vänta)
                             task = asyncio.create_task(_process_tts_request(ws, text, session_started_at))
                             active_tts_requests[ws] = task
                             
-                            try:
-                                await task
-                            except asyncio.CancelledError:
-                                logger.info("TTS request was cancelled")
-                            finally:
-                                # Ta bort från active requests när klar
-                                if ws in active_tts_requests:
-                                    del active_tts_requests[ws]
+                            # Låt task köra i bakgrunden utan att blockera
+                            # Detta gör att nya förfrågningar kan komma in snabbt
                         
                         # Hantera disconnect-förfrågan
                         elif data.get("type") == "disconnect":
@@ -170,12 +161,19 @@ async def _process_tts_request(ws: WebSocket, text: str, session_started_at: flo
                 return
                 
             # Hantera audio-streaming till frontend
-            audio_bytes_total, last_chunk_ts, should_break = await send_audio_to_frontend(
-                ws, server_msg, current_audio_bytes, last_chunk_ts
-            )
-            
-            if should_break:
-                break
+            try:
+                audio_bytes_total, last_chunk_ts, should_break = await send_audio_to_frontend(
+                    ws, server_msg, current_audio_bytes, last_chunk_ts
+                )
+                
+                if should_break:
+                    break
+            except Exception as e:
+                # Om WebSocket är stängd, avbryt snabbt
+                if "WebSocket" in str(e) and "closed" in str(e):
+                    logger.info("WebSocket closed during streaming, cancelling TTS")
+                    return
+                raise
         
         # Kontrollera om denna request är cancelled innan vi skickar "done"
         if asyncio.current_task().cancelled():

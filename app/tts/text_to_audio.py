@@ -24,26 +24,12 @@ async def process_text_to_audio(ws, text, started_at):
     # Logga API-detaljer i terminalen
     logger.info("Connecting to ElevenLabs with voice_id=%s, model_id=%s", DEFAULT_VOICE_ID, DEFAULT_MODEL_ID)
     
-    # Skicka API-detaljer till frontend för debugging
-    import json
-    try:
-        await ws.send_text(json.dumps({
-            "type": "debug", 
-            "provider": "elevenlabs", 
-            "api_details": {
-                "voice_id": DEFAULT_VOICE_ID,
-                "model_id": DEFAULT_MODEL_ID,
-                "url": eleven_ws_url,
-                "has_api_key": bool(ELEVENLABS_API_KEY)
-            }
-        }))
-    except Exception as e:
-        logger.warning("Failed to send debug info to frontend: %s", e)
+    # Ta bort onödig debug-information som kan orsaka uppehåll
 
     audio_bytes_total = 0
-    inactivity_timeout_sec = 12  # intern timeout efter att vi sagt "streaming"
+    inactivity_timeout_sec = 3  # Kortare timeout för snabbare cancellation
 
-    async with ws_connect(eleven_ws_url, extra_headers=headers, open_timeout=30) as eleven:
+    async with ws_connect(eleven_ws_url, extra_headers=headers, open_timeout=5) as eleven:
         # 3) Initiera session
         init_msg = {
             "text": " ",  # kickstart
@@ -62,20 +48,7 @@ async def process_text_to_audio(ws, text, started_at):
         await eleven.send(orjson.dumps(init_msg).decode())
         logger.debug("Sent init message to ElevenLabs")
         
-        # Skicka init-meddelandet till frontend för debugging
-        try:
-            await ws.send_text(json.dumps({
-                "type": "debug",
-                "provider": "elevenlabs", 
-                "init_message": {
-                    "text": init_msg["text"],
-                    "voice_settings": init_msg["voice_settings"],
-                    "generation_config": init_msg["generation_config"],
-                    "has_api_key": bool(init_msg["xi_api_key"])
-                }
-            }))
-        except Exception as e:
-            logger.warning("Failed to send init debug info to frontend: %s", e)
+        # Ta bort onödig debug-information som kan orsaka uppehåll
 
         # 4) Skicka text och trigga generering direkt
         await eleven.send(orjson.dumps({"text": text, "try_trigger_generation": True}).decode())
