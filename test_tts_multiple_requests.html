@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TTS Multiple Requests Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .container {
+            border: 1px solid #ccc;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+        textarea {
+            width: 100%;
+            height: 100px;
+            margin-bottom: 10px;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        button {
+            background-color: #007bff;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-right: 10px;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        button:disabled {
+            background-color: #6c757d;
+            cursor: not-allowed;
+        }
+        .status {
+            margin-top: 10px;
+            padding: 10px;
+            border-radius: 4px;
+            font-weight: bold;
+        }
+        .status.ready { background-color: #d4edda; color: #155724; }
+        .status.processing { background-color: #fff3cd; color: #856404; }
+        .status.streaming { background-color: #cce5ff; color: #004085; }
+        .status.done { background-color: #d1ecf1; color: #0c5460; }
+        .status.error { background-color: #f8d7da; color: #721c24; }
+        .log {
+            background-color: #f8f9fa;
+            border: 1px solid #dee2e6;
+            padding: 10px;
+            border-radius: 4px;
+            height: 200px;
+            overflow-y: auto;
+            font-family: monospace;
+            font-size: 12px;
+        }
+        .request-id {
+            color: #6c757d;
+            font-size: 0.9em;
+        }
+    </style>
+</head>
+<body>
+    <h1>TTS Multiple Requests Test</h1>
+    <p>Detta test visar hur TTS nu kan hantera flera förfrågningar per WebSocket-anslutning.</p>
+
+    <div class="container">
+        <h3>Anslutning</h3>
+        <button id="connectBtn">Anslut till TTS</button>
+        <button id="disconnectBtn" disabled>Koppla från</button>
+        <div id="connectionStatus" class="status">Inte ansluten</div>
+    </div>
+
+    <div class="container">
+        <h3>TTS Förfrågningar</h3>
+        <textarea id="textInput" placeholder="Skriv text som ska konverteras till tal...">Hej! Detta är en test av TTS med flera förfrågningar per anslutning.</textarea>
+        <button id="sendBtn" disabled>Skicka TTS-förfrågan</button>
+        <button id="pingBtn" disabled>Ping</button>
+        <div id="requestStatus" class="status">Väntar på anslutning...</div>
+    </div>
+
+    <div class="container">
+        <h3>Logg</h3>
+        <div id="log" class="log"></div>
+        <button id="clearLogBtn">Rensa logg</button>
+    </div>
+
+    <script>
+        let ws = null;
+        let isConnected = false;
+
+        const connectBtn = document.getElementById('connectBtn');
+        const disconnectBtn = document.getElementById('disconnectBtn');
+        const sendBtn = document.getElementById('sendBtn');
+        const pingBtn = document.getElementById('pingBtn');
+        const textInput = document.getElementById('textInput');
+        const connectionStatus = document.getElementById('connectionStatus');
+        const requestStatus = document.getElementById('requestStatus');
+        const log = document.getElementById('log');
+        const clearLogBtn = document.getElementById('clearLogBtn');
+
+        function logMessage(message, type = 'info') {
+            const timestamp = new Date().toLocaleTimeString();
+            const logEntry = document.createElement('div');
+            logEntry.innerHTML = `<span style="color: #6c757d;">[${timestamp}]</span> ${message}`;
+            if (type === 'error') {
+                logEntry.style.color = '#dc3545';
+            } else if (type === 'success') {
+                logEntry.style.color = '#28a745';
+            }
+            log.appendChild(logEntry);
+            log.scrollTop = log.scrollHeight;
+        }
+
+        function updateConnectionStatus(status, className = '') {
+            connectionStatus.textContent = status;
+            connectionStatus.className = `status ${className}`;
+        }
+
+        function updateRequestStatus(status, className = '') {
+            requestStatus.textContent = status;
+            requestStatus.className = `status ${className}`;
+        }
+
+        function connect() {
+            if (ws) {
+                ws.close();
+            }
+
+            // Anpassa URL:en till din server
+            ws = new WebSocket('ws://localhost:8000/ws/tts');
+            
+            ws.onopen = function() {
+                isConnected = true;
+                updateConnectionStatus('Ansluten', 'ready');
+                connectBtn.disabled = true;
+                disconnectBtn.disabled = false;
+                sendBtn.disabled = false;
+                pingBtn.disabled = false;
+                logMessage('WebSocket anslutning etablerad', 'success');
+            };
+
+            ws.onmessage = function(event) {
+                try {
+                    const data = JSON.parse(event.data);
+                    logMessage(`Mottaget: ${JSON.stringify(data, null, 2)}`);
+                    
+                    switch(data.type) {
+                        case 'status':
+                            handleStatusMessage(data);
+                            break;
+                        case 'pong':
+                            logMessage('Pong mottaget', 'success');
+                            break;
+                        case 'error':
+                            updateRequestStatus(`Fel: ${data.message}`, 'error');
+                            logMessage(`Fel: ${data.message}`, 'error');
+                            break;
+                        default:
+                            logMessage(`Okänt meddelandetyp: ${data.type}`);
+                    }
+                } catch (e) {
+                    logMessage(`Fel vid parsning av meddelande: ${e.message}`, 'error');
+                }
+            };
+
+            ws.onclose = function() {
+                isConnected = false;
+                updateConnectionStatus('Frånkopplad', 'error');
+                connectBtn.disabled = false;
+                disconnectBtn.disabled = true;
+                sendBtn.disabled = true;
+                pingBtn.disabled = true;
+                logMessage('WebSocket anslutning stängd');
+            };
+
+            ws.onerror = function(error) {
+                logMessage(`WebSocket fel: ${error}`, 'error');
+            };
+        }
+
+        function handleStatusMessage(data) {
+            const requestId = data.request_id ? ` (ID: ${data.request_id})` : '';
+            
+            switch(data.stage) {
+                case 'ready':
+                    updateRequestStatus('Redo för förfrågningar', 'ready');
+                    break;
+                case 'processing':
+                    updateRequestStatus(`Bearbetar text (${data.text_length} tecken)${requestId}`, 'processing');
+                    break;
+                case 'connecting-elevenlabs':
+                    updateRequestStatus(`Ansluter till ElevenLabs${requestId}`, 'processing');
+                    break;
+                case 'streaming':
+                    updateRequestStatus(`Streamar audio${requestId}`, 'streaming');
+                    break;
+                case 'done':
+                    updateRequestStatus(`Klar! ${data.audio_bytes_total} bytes, ${data.elapsed_sec}s${requestId}`, 'done');
+                    break;
+                default:
+                    updateRequestStatus(`Okänt steg: ${data.stage}${requestId}`, 'error');
+            }
+        }
+
+        function sendTTSRequest() {
+            if (!isConnected || !ws) {
+                logMessage('Inte ansluten till WebSocket', 'error');
+                return;
+            }
+
+            const text = textInput.value.trim();
+            if (!text) {
+                logMessage('Ingen text angiven', 'error');
+                return;
+            }
+
+            const message = {
+                type: 'tts_request',
+                text: text
+            };
+
+            ws.send(JSON.stringify(message));
+            logMessage(`Skickat TTS-förfrågan: "${text.substring(0, 50)}${text.length > 50 ? '...' : ''}"`);
+        }
+
+        function sendPing() {
+            if (!isConnected || !ws) {
+                logMessage('Inte ansluten till WebSocket', 'error');
+                return;
+            }
+
+            const message = { type: 'ping' };
+            ws.send(JSON.stringify(message));
+            logMessage('Ping skickat');
+        }
+
+        function disconnect() {
+            if (ws) {
+                ws.send(JSON.stringify({ type: 'disconnect' }));
+                ws.close();
+            }
+        }
+
+        function clearLog() {
+            log.innerHTML = '';
+        }
+
+        // Event listeners
+        connectBtn.addEventListener('click', connect);
+        disconnectBtn.addEventListener('click', disconnect);
+        sendBtn.addEventListener('click', sendTTSRequest);
+        pingBtn.addEventListener('click', sendPing);
+        clearLogBtn.addEventListener('click', clearLog);
+
+        // Skicka TTS-förfrågan med Enter
+        textInput.addEventListener('keydown', function(e) {
+            if (e.key === 'Enter' && e.ctrlKey) {
+                sendTTSRequest();
+            }
+        });
+
+        logMessage('Sida laddad. Klicka "Anslut till TTS" för att börja.');
+    </script>
+</body>
+</html>
