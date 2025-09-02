@@ -88,6 +88,12 @@ async def ws_tts(ws: WebSocket):
                         elif data.get("type") == "playback_complete":
                             request_id = data.get("requestId")
                             logger.info("Received playback_complete for requestId: %s", request_id)
+                            
+                            # RENSA active_tts_requests när playback är klar
+                            if ws in active_tts_requests:
+                                del active_tts_requests[ws]
+                                logger.info("Cleared active TTS request after playback_complete - channel is now free")
+                            
                             await _send_json(ws, {"type": "status", "stage": "done"})
                         
                         else:
@@ -195,6 +201,11 @@ async def _process_tts_request(ws: WebSocket, text: str, session_started_at: flo
         })
         
         logger.info("TTS request completed: %d bytes, %.3fs", audio_bytes_total, time.time() - request_started_at)
+        
+        # RENSA active_tts_requests när TTS-förfrågan är klar
+        if ws in active_tts_requests:
+            del active_tts_requests[ws]
+            logger.info("Cleared active TTS request - channel is now free")
 
     except asyncio.CancelledError:
         logger.info("TTS request was cancelled: %s", text[:50] + "..." if len(text) > 50 else text)
@@ -216,3 +227,8 @@ async def _process_tts_request(ws: WebSocket, text: str, session_started_at: flo
             "message": str(e),
             "request_id": int(request_started_at * 1000)
         })
+    finally:
+        # Säkerställ att active_tts_requests rensas även vid fel
+        if ws in active_tts_requests:
+            del active_tts_requests[ws]
+            logger.info("Cleared active TTS request in finally block - channel is now free")
