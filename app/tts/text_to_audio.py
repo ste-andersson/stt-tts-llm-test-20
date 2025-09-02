@@ -13,28 +13,22 @@ DEFAULT_MODEL_ID = "eleven_flash_v2_5"
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")  # Hämtas från .env
 
 
-def calculate_dynamic_timeout(text_length: int) -> int:
+def calculate_simple_timeout(text_length: int) -> int:
     """
-    Beräknar dynamisk timeout baserat på textlängd och uppskattad talspråkstid.
+    Enkel timeout som bara används som fallback om ElevenLabs inte skickar "isFinal".
     
-    Formel baserad på talspråkshastighet:
-    - Genomsnittlig talspråkshastighet: ~150 ord per minut
-    - Genomsnittligt antal tecken per ord: ~5 tecken
-    - Detta ger ~12.5 tecken per sekund
-    - Vi lägger till 50% marginal för ElevenLabs processing
-    - Min: 5s, Max: 60s
+    Strategi:
+    1. Lita på ElevenLabs "isFinal" signaler för naturlig avslutning
+    2. Använd bara timeout som fallback för att undvika att hänga
+    3. Mycket generös timeout eftersom vi litar på ElevenLabs
     """
-    # Uppskatta talspråkstid baserat på ~12.5 tecken per sekund
-    estimated_speech_time = text_length / 12.5
-    
-    # Lägg till 50% marginal för ElevenLabs processing och nätverksfördröjning
-    total_timeout = estimated_speech_time * 1.5
-    
-    # Lägg till minimum bas-timeout för mycket korta meddelanden
-    total_timeout = max(5, total_timeout)
-    
-    # Begränsa till max 60 sekunder
-    return max(5, min(60, int(total_timeout)))
+    # Generös timeout som bara används som fallback
+    if text_length <= 100:
+        return 8  # 8 sekunder för korta meddelanden
+    elif text_length <= 300:
+        return 15  # 15 sekunder för medellånga meddelanden
+    else:
+        return 25  # 25 sekunder för långa meddelanden
 
 async def process_text_to_audio(ws, text, started_at):
     """Hanterar ElevenLabs API-kommunikation och returnerar rå data."""
@@ -47,16 +41,14 @@ async def process_text_to_audio(ws, text, started_at):
     # Logga API-detaljer i terminalen
     logger.info("Connecting to ElevenLabs with voice_id=%s, model_id=%s", DEFAULT_VOICE_ID, DEFAULT_MODEL_ID)
     
-    # Beräkna dynamisk timeout baserat på textlängd
+    # Beräkna enkel timeout som fallback
     text_length = len(text)
-    inactivity_timeout_sec = calculate_dynamic_timeout(text_length)
-    
-    # Beräkna uppskattad talspråkstid för loggning
-    estimated_speech_time = text_length / 12.5
-    logger.info("Text: %d chars, estimated speech time: %.1fs, timeout: %ds", 
-                text_length, estimated_speech_time, inactivity_timeout_sec)
-
     audio_bytes_total = 0
+    
+    # Enkel timeout som bara används som fallback
+    fallback_timeout_sec = calculate_simple_timeout(text_length)
+    logger.info("Text: %d chars, fallback timeout: %ds (litar på ElevenLabs 'isFinal')", 
+                text_length, fallback_timeout_sec)
 
     async with ws_connect(eleven_ws_url, extra_headers=headers, open_timeout=5) as eleven:
         # 3) Initiera session
@@ -95,10 +87,12 @@ async def process_text_to_audio(ws, text, started_at):
                 break
                 
             try:
-                server_msg = await asyncio.wait_for(eleven.recv(), timeout=inactivity_timeout_sec)
+                # Använd enkel timeout som fallback - lita på ElevenLabs "isFinal"
+                server_msg = await asyncio.wait_for(eleven.recv(), timeout=fallback_timeout_sec)
             except asyncio.TimeoutError:
-                # Vi har inte fått något på N sekunder → ge upp snyggt
-                logger.warning("No data from ElevenLabs for %ss, aborting stream", inactivity_timeout_sec)
+                # Fallback timeout - ElevenLabs skickade inte "isFinal" inom rimlig tid
+                logger.warning("ElevenLabs fallback timeout after %ds (audio_bytes=%d), aborting stream", 
+                             fallback_timeout_sec, audio_bytes_total)
                 break
             except asyncio.CancelledError:
                 logger.info("TTS request was cancelled during ElevenLabs receive")
@@ -111,14 +105,7 @@ async def process_text_to_audio(ws, text, started_at):
             if isinstance(server_msg, (bytes, bytearray)):
                 audio_bytes_total += len(server_msg)
 
-            # Slut?
-            if isinstance(server_msg, str):
-                try:
-                    payload = orjson.loads(server_msg)
-                    if payload.get("isFinal") is True or payload.get("event") == "finalOutput":
-                        logger.debug("Final frame from ElevenLabs received")
-                        break
-                except:
-                    pass
+            # Lita på att send_audio_to_frontend hanterar isFinal-signaler
+            # Vi behöver inte hantera det här eftersom tts_ws.py gör det
 
         logger.info("Stream done: audio_bytes_total=%d elapsed=%.3fs", audio_bytes_total, time.time() - started_at)

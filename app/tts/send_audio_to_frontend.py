@@ -54,6 +54,6 @@ async def send_audio_to_frontend(ws, server_msg, audio_bytes_total, last_chunk_t
     # Slut?
     is_final = payload.get("isFinal") is True or payload.get("event") == "finalOutput"
     if is_final:
-        logger.debug("Final frame from ElevenLabs received")
+        logger.info("ElevenLabs signaled completion with 'isFinal' - ending stream naturally")
     
     return audio_bytes_total, last_chunk_ts, is_final
