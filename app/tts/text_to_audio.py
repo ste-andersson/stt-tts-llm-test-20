@@ -13,6 +13,22 @@ DEFAULT_MODEL_ID = "eleven_flash_v2_5"
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")  # Hämtas från .env
 
 
+def calculate_dynamic_timeout(text_length: int) -> int:
+    """
+    Beräknar dynamisk timeout baserat på textlängd.
+    
+    Formel: 
+    - Bas-timeout: 3 sekunder
+    - Extra tid: 0.1 sekund per 10 tecken
+    - Min: 3s, Max: 30s
+    """
+    base_timeout = 3
+    extra_time = (text_length / 10) * 0.1  # 0.1s per 10 tecken
+    total_timeout = base_timeout + extra_time
+    
+    # Begränsa mellan 3 och 30 sekunder
+    return max(3, min(30, int(total_timeout)))
+
 async def process_text_to_audio(ws, text, started_at):
     """Hanterar ElevenLabs API-kommunikation och returnerar rå data."""
     
@@ -24,10 +40,12 @@ async def process_text_to_audio(ws, text, started_at):
     # Logga API-detaljer i terminalen
     logger.info("Connecting to ElevenLabs with voice_id=%s, model_id=%s", DEFAULT_VOICE_ID, DEFAULT_MODEL_ID)
     
-    # Ta bort onödig debug-information som kan orsaka uppehåll
+    # Beräkna dynamisk timeout baserat på textlängd
+    text_length = len(text)
+    inactivity_timeout_sec = calculate_dynamic_timeout(text_length)
+    logger.info("Text length: %d chars, calculated timeout: %ds", text_length, inactivity_timeout_sec)
 
     audio_bytes_total = 0
-    inactivity_timeout_sec = 3  # Kortare timeout för snabbare cancellation
 
     async with ws_connect(eleven_ws_url, extra_headers=headers, open_timeout=5) as eleven:
         # 3) Initiera session
